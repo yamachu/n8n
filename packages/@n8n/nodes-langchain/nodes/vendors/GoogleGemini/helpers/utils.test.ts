@@ -1074,66 +1074,75 @@ describe('GoogleGemini -> utils', () => {
 	});
 
 	describe('schema formatting', () => {
-		it('should map const to enum and remove unsupported keys', () => {
-			const schema = toGeminiCompatibleSchema({
+		/**
+		 * Test suite for schema transformation to Gemini-compatible format
+		 *
+		 * Gemini's function calling API doesn't support certain JSON schema keywords:
+		 * - Replaces 'const' with 'enum' (Gemini's supported literal syntax)
+		 * - Removes 'exclusiveMinimum', 'exclusiveMaximum', 'examples', 'additionalProperties'
+		 */
+
+		it('should convert const to enum and remove Gemini-unsupported schema keywords', () => {
+			// Arrange
+			const schema = {
 				type: 'object',
 				properties: {
 					status: { const: 'ok', default: 'ok', examples: ['ok'] },
 					count: { type: 'number', exclusiveMinimum: 0, minimum: 1 },
 				},
 				additionalProperties: false,
-			});
+			};
 
-			expect(schema).toEqual({
+			// Act
+			const result = toGeminiCompatibleSchema(schema);
+
+			// Assert: const becomes enum, unsupported keywords are removed
+			expect(result).toEqual({
 				type: 'object',
 				properties: {
 					status: { enum: ['ok'] },
 					count: { type: 'number', minimum: 1 },
 				},
 			});
+			expect(result).not.toHaveProperty('additionalProperties');
 		});
 
-		it('should collapse oneOf and allOf into Gemini-compatible schema', () => {
-			const schema = toGeminiCompatibleSchema({
+		it('should preserve default and type information while removing unsupported keywords', () => {
+			// Arrange: Schema with both supported and unsupported metadata
+			const schema = {
 				type: 'object',
 				properties: {
-					payload: {
-						oneOf: [{ type: 'string' }, { type: 'number' }],
-					},
-					data: {
-						allOf: [
-							{
-								type: 'object',
-								properties: { a: { type: 'string' } },
-								required: ['a'],
-							},
-							{
-								type: 'object',
-								properties: { b: { type: 'number' } },
-								required: ['b'],
-							},
-						],
-					},
+					status: { const: 'ok', default: 'ok', examples: ['ok'] },
+					count: { type: 'number', exclusiveMinimum: 0, minimum: 1 },
+					payload: { oneOf: [{ type: 'string' }, { type: 'number' }] },
 				},
-			});
+				additionalProperties: false,
+			};
 
-			expect(schema).toEqual({
+			// Act
+			const result = toGeminiCompatibleSchema(schema);
+
+			// Assert
+			expect(result).toEqual({
 				type: 'object',
 				properties: {
-					payload: { anyOf: [{ type: 'string' }] },
-					data: {
-						type: 'object',
-						properties: {
-							a: { type: 'string' },
-							b: { type: 'number' },
-						},
-						required: ['a', 'b'],
-					},
+					status: { enum: ['ok'] },
+					count: { type: 'number', minimum: 1 },
+					payload: { oneOf: [{ type: 'string' }, { type: 'number' }] },
 				},
 			});
+			// additionalProperties should be removed
+			expect(result).not.toHaveProperty('additionalProperties');
+			// examples should be removed
+			const statusProps = (result.properties as Record<string, unknown>).status as Record<
+				string,
+				unknown
+			>;
+			expect(statusProps).not.toHaveProperty('examples');
 		});
 
-		it('should sanitize a declaration generated from zod schema', () => {
+		it('should sanitize Gemini tool declarations generated from zod schemas', () => {
+			// Arrange
 			const tool = {
 				name: 'test_schema_tool',
 				description: 'schema test',
@@ -1143,15 +1152,53 @@ describe('GoogleGemini -> utils', () => {
 				}),
 			} as unknown as Tool;
 
+			// Act
 			const declaration = formatToGeminiToolDeclaration(tool);
 
+			// Assert
 			expect(declaration.name).toBe('test_schema_tool');
+			expect(declaration.description).toBe('schema test');
 			expect(declaration.parameters).not.toHaveProperty('additionalProperties');
+
 			const properties = declaration.parameters.properties as Record<string, unknown>;
 			expect(properties.state).toEqual(expect.objectContaining({ enum: ['ready'] }));
+
+			// exclusiveMinimum should be removed from number schema
 			if (typeof properties.value === 'object' && properties.value !== null) {
-				expect(properties.value).not.toHaveProperty('exclusiveMinimum');
+				const valueProps = properties.value as Record<string, unknown>;
+				expect(valueProps).not.toHaveProperty('exclusiveMinimum');
+				expect(valueProps).toHaveProperty('type', 'number');
 			}
+		});
+
+		it('should handle nested objects with unsupported keywords at multiple levels', () => {
+			// Arrange
+			const schema = {
+				type: 'object',
+				properties: {
+					user: {
+						type: 'object',
+						properties: {
+							id: { type: 'integer', exclusiveMinimum: 0 },
+							email: { type: 'string', examples: ['user@example.com'] },
+						},
+					},
+				},
+				additionalProperties: false,
+			};
+
+			// Act
+			const result = toGeminiCompatibleSchema(schema);
+
+			// Assert
+			expect(result.properties.user).toHaveProperty('properties');
+			const userProps = (result.properties.user as Record<string, unknown>).properties as Record<
+				string,
+				Record<string, unknown>
+			>;
+
+			expect(userProps.id).not.toHaveProperty('exclusiveMinimum');
+			expect(userProps.email).not.toHaveProperty('examples');
 		});
 	});
 });

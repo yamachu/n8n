@@ -22,54 +22,78 @@ import {
 } from '../../vendors/GoogleGemini/helpers/utils';
 import { getAdditionalOptions } from '../gemini-common/additional-options';
 
+/**
+ * Type representing the input accepted by ChatGoogleGenerativeAI.bindTools()
+ */
 type GeminiBindToolsInput = Parameters<ChatGoogleGenerativeAI['bindTools']>[0];
 
-type FunctionDeclaration = {
+/**
+ * Gemini function declaration structure
+ */
+type GeminiFunctionDeclaration = {
 	name: string;
 	description?: string;
 	parameters?: IDataObject;
 };
 
-type FunctionDeclarationsTool = {
-	functionDeclarations: FunctionDeclaration[];
+/**
+ * Tool with Gemini function declarations format
+ */
+type GeminiFunctionDeclarationsTool = {
+	functionDeclarations: GeminiFunctionDeclaration[];
 };
 
-function isObject(value: unknown): value is Record<string, unknown> {
+/**
+ * Type guard to check if a value is a plain object
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null;
 }
 
-function isFunctionDeclarationsTool(value: unknown): value is FunctionDeclarationsTool {
-	if (!isObject(value) || !Array.isArray(value.functionDeclarations)) {
+/**
+ * Type guard to check if a value is a Gemini function declarations tool
+ */
+function isFunctionDeclarationsTool(value: unknown): value is GeminiFunctionDeclarationsTool {
+	if (!isPlainObject(value) || !Array.isArray(value.functionDeclarations)) {
 		return false;
 	}
 
 	return value.functionDeclarations.every(
-		(declaration) => isObject(declaration) && typeof declaration.name === 'string',
+		(declaration) => isPlainObject(declaration) && typeof declaration.name === 'string',
 	);
 }
 
-function isLangChainToolLike(value: unknown): value is Tool {
+/**
+ * Type guard to check if a value is a LangChain tool
+ */
+function isLangChainTool(value: unknown): value is Tool {
 	return (
-		isObject(value) &&
+		isPlainObject(value) &&
 		typeof value.name === 'string' &&
 		typeof value.description === 'string' &&
 		'schema' in value
 	);
 }
 
-function isOpenAiFunctionToolLike(
+/**
+ * Type guard to check if a value is an OpenAI-style function tool
+ */
+function isOpenAiFunctionTool(
 	value: unknown,
 ): value is { type: 'function'; function: Record<string, unknown> } {
-	if (!isObject(value) || value.type !== 'function' || !isObject(value.function)) {
+	if (!isPlainObject(value) || value.type !== 'function' || !isPlainObject(value.function)) {
 		return false;
 	}
 
 	return typeof value.function.name === 'string';
 }
 
-function sanitizeFunctionDeclarationsTool(
-	tool: FunctionDeclarationsTool,
-): FunctionDeclarationsTool {
+/**
+ * Sanitize existing Gemini function declarations by removing unsupported schema keywords
+ */
+function sanitizeFunctionDeclarations(
+	tool: GeminiFunctionDeclarationsTool,
+): GeminiFunctionDeclarationsTool {
 	return {
 		functionDeclarations: tool.functionDeclarations.map((declaration) => ({
 			...declaration,
@@ -78,10 +102,13 @@ function sanitizeFunctionDeclarationsTool(
 	};
 }
 
-function convertOpenAiFunctionTool(tool: {
+/**
+ * Convert OpenAI-style function tool to Gemini function declarations format
+ */
+function convertOpenAiToFunctionDeclarations(tool: {
 	type: 'function';
 	function: Record<string, unknown>;
-}): FunctionDeclarationsTool {
+}): GeminiFunctionDeclarationsTool {
 	return {
 		functionDeclarations: [
 			{
@@ -96,42 +123,47 @@ function convertOpenAiFunctionTool(tool: {
 	};
 }
 
+/**
+ * Normalize and sanitize various tool formats to Gemini function declarations format
+ * - Converts LangChain tools to Gemini Function Declarations
+ * - Converts OpenAI-style function tools to Gemini format
+ * - Sanitizes existing Gemini declarations by removing unsupported schema keywords
+ * - Preserves passthrough tools (e.g., googleSearchRetrieval)
+ */
 export function normalizeGeminiBindTools(tools: GeminiBindToolsInput): GeminiBindToolsInput {
-	const passthroughTools: unknown[] = [];
-	const functionDeclarations: FunctionDeclaration[] = [];
+	const otherTools: unknown[] = [];
+	const functionDeclarations: GeminiFunctionDeclaration[] = [];
 
 	for (const tool of tools) {
-		if (isLangChainToolLike(tool)) {
+		if (isLangChainTool(tool)) {
 			functionDeclarations.push(formatToGeminiToolDeclaration(tool));
 			continue;
 		}
 
-		if (isOpenAiFunctionToolLike(tool)) {
-			functionDeclarations.push.apply(
-				functionDeclarations,
-				convertOpenAiFunctionTool(tool).functionDeclarations,
-			);
+		if (isOpenAiFunctionTool(tool)) {
+			functionDeclarations.push(...convertOpenAiToFunctionDeclarations(tool).functionDeclarations);
 			continue;
 		}
 
 		if (isFunctionDeclarationsTool(tool)) {
-			functionDeclarations.push.apply(
-				functionDeclarations,
-				sanitizeFunctionDeclarationsTool(tool).functionDeclarations,
-			);
+			functionDeclarations.push(...sanitizeFunctionDeclarations(tool).functionDeclarations);
 			continue;
 		}
 
-		passthroughTools.push(tool);
+		otherTools.push(tool);
 	}
 
 	if (functionDeclarations.length === 0) {
-		return passthroughTools as GeminiBindToolsInput;
+		return otherTools as GeminiBindToolsInput;
 	}
 
-	return [...passthroughTools, { functionDeclarations }] as GeminiBindToolsInput;
+	return [...otherTools, { functionDeclarations }] as GeminiBindToolsInput;
 }
 
+/**
+ * Patch ChatGoogleGenerativeAI.bindTools() to automatically normalize and sanitize tools
+ * before passing them to the LLM
+ */
 function patchGeminiBindTools(model: ChatGoogleGenerativeAI): void {
 	const originalBindTools = model.bindTools.bind(model);
 

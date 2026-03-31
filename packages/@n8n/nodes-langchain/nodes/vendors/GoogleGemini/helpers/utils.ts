@@ -11,8 +11,9 @@ import type { FileSearchOperation, Tool as GeminiTool } from './interfaces';
 
 const OPERATION_CHECK_INTERVAL = 1000;
 
-type SchemaObject = Record<string, unknown>;
-
+/**
+ * Schema keywords that Gemini's function calling API doesn't support
+ */
 const NON_GEMINI_SCHEMA_KEYS = new Set([
 	'additionalProperties',
 	'examples',
@@ -46,10 +47,17 @@ interface UploadStreamConfig {
 
 const CHUNK_SIZE = 256 * 1024;
 
+/**
+ * Type guard to check if a value is a plain object (not array, not null)
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Recursively convert schema values to Gemini-compatible format
+ * Removes unsupported keywords and undefined values
+ */
 function toGeminiSchemaValue(value: unknown): unknown {
 	if (
 		typeof value === 'string' ||
@@ -78,7 +86,13 @@ function toGeminiSchemaValue(value: unknown): unknown {
 	return undefined;
 }
 
-function sanitizeGeminiSchemaObject(schema: Record<string, unknown>): SchemaObject {
+/**
+ * Sanitize a JSON schema object to Gemini-compatible format:
+ * - Converts 'const' to 'enum' (Gemini's supported literal syntax)
+ * - Removes unsupported keywords (NON_GEMINI_SCHEMA_KEYS)
+ * - Recursively processes nested schema values
+ */
+function sanitizeGeminiSchemaObject(schema: Record<string, unknown>): Record<string, unknown> {
 	const nextSchema: Record<string, unknown> = { ...schema };
 
 	if (nextSchema.const !== undefined) {
@@ -90,7 +104,7 @@ function sanitizeGeminiSchemaObject(schema: Record<string, unknown>): SchemaObje
 		delete nextSchema[key];
 	}
 
-	const sanitizedSchema: SchemaObject = {};
+	const sanitizedSchema: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(nextSchema)) {
 		const schemaValue = toGeminiSchemaValue(value);
 		if (schemaValue !== undefined) {
