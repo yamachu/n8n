@@ -1,13 +1,17 @@
+import type { Tool } from '@langchain/core/tools';
 import axios from 'axios';
 import { mockDeep } from 'jest-mock-extended';
 import type { IBinaryData, IExecuteFunctions } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
+import { z } from 'zod';
 
 import {
 	createFileSearchStore,
 	deleteFileSearchStore,
 	downloadFile,
+	formatToGeminiToolDeclaration,
 	listFileSearchStores,
+	toGeminiCompatibleSchema,
 	transferFile,
 	uploadFile,
 	uploadToFileSearchStore,
@@ -1066,6 +1070,88 @@ describe('GoogleGemini -> utils', () => {
 			expect(apiRequestMock).toHaveBeenCalledWith('DELETE', `/v1beta/${name}`, {
 				qs: { force: false },
 			});
+		});
+	});
+
+	describe('schema formatting', () => {
+		it('should map const to enum and remove unsupported keys', () => {
+			const schema = toGeminiCompatibleSchema({
+				type: 'object',
+				properties: {
+					status: { const: 'ok', default: 'ok', examples: ['ok'] },
+					count: { type: 'number', exclusiveMinimum: 0, minimum: 1 },
+				},
+				additionalProperties: false,
+			});
+
+			expect(schema).toEqual({
+				type: 'object',
+				properties: {
+					status: { enum: ['ok'] },
+					count: { type: 'number', minimum: 1 },
+				},
+			});
+		});
+
+		it('should collapse oneOf and allOf into Gemini-compatible schema', () => {
+			const schema = toGeminiCompatibleSchema({
+				type: 'object',
+				properties: {
+					payload: {
+						oneOf: [{ type: 'string' }, { type: 'number' }],
+					},
+					data: {
+						allOf: [
+							{
+								type: 'object',
+								properties: { a: { type: 'string' } },
+								required: ['a'],
+							},
+							{
+								type: 'object',
+								properties: { b: { type: 'number' } },
+								required: ['b'],
+							},
+						],
+					},
+				},
+			});
+
+			expect(schema).toEqual({
+				type: 'object',
+				properties: {
+					payload: { anyOf: [{ type: 'string' }] },
+					data: {
+						type: 'object',
+						properties: {
+							a: { type: 'string' },
+							b: { type: 'number' },
+						},
+						required: ['a', 'b'],
+					},
+				},
+			});
+		});
+
+		it('should sanitize a declaration generated from zod schema', () => {
+			const tool = {
+				name: 'test_schema_tool',
+				description: 'schema test',
+				schema: z.object({
+					state: z.literal('ready'),
+					value: z.number().gt(0),
+				}),
+			} as unknown as Tool;
+
+			const declaration = formatToGeminiToolDeclaration(tool);
+
+			expect(declaration.name).toBe('test_schema_tool');
+			expect(declaration.parameters).not.toHaveProperty('additionalProperties');
+			const properties = declaration.parameters.properties as Record<string, unknown>;
+			expect(properties.state).toEqual(expect.objectContaining({ enum: ['ready'] }));
+			if (typeof properties.value === 'object' && properties.value !== null) {
+				expect(properties.value).not.toHaveProperty('exclusiveMinimum');
+			}
 		});
 	});
 });

@@ -1,13 +1,24 @@
+import type { Tool } from '@langchain/core/tools';
 import axios from 'axios';
 import type { IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
-import { Readable } from 'node:stream';
 import type Stream from 'node:stream';
+import { Readable } from 'node:stream';
+import zodToJsonSchema from 'zod-to-json-schema';
 
-import type { FileSearchOperation } from './interfaces';
 import { apiRequest } from '../transport';
+import type { FileSearchOperation, Tool as GeminiTool } from './interfaces';
 
 const OPERATION_CHECK_INTERVAL = 1000;
+
+type SchemaObject = Record<string, unknown>;
+
+const NON_GEMINI_SCHEMA_KEYS = new Set([
+	'additionalProperties',
+	'examples',
+	'exclusiveMinimum',
+	'exclusiveMaximum',
+]);
 
 interface File {
 	name: string;
@@ -34,6 +45,81 @@ interface UploadStreamConfig {
 }
 
 const CHUNK_SIZE = 256 * 1024;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toGeminiSchemaValue(value: unknown): unknown {
+	if (
+		typeof value === 'string' ||
+		typeof value === 'number' ||
+		typeof value === 'boolean' ||
+		value === null
+	) {
+		return value;
+	}
+
+	if (Array.isArray(value)) {
+		const converted = value
+			.map((item) => toGeminiSchemaValue(item))
+			.filter((item) => item !== undefined);
+		return converted;
+	}
+
+	if (isPlainObject(value)) {
+		const converted = sanitizeGeminiSchemaObject(value);
+		if (Object.keys(converted).length === 0) {
+			return undefined;
+		}
+		return converted;
+	}
+
+	return undefined;
+}
+
+function sanitizeGeminiSchemaObject(schema: Record<string, unknown>): SchemaObject {
+	const nextSchema: Record<string, unknown> = { ...schema };
+
+	if (nextSchema.const !== undefined) {
+		nextSchema.enum = [nextSchema.const];
+		delete nextSchema.const;
+	}
+
+	for (const key of NON_GEMINI_SCHEMA_KEYS) {
+		delete nextSchema[key];
+	}
+
+	const sanitizedSchema: SchemaObject = {};
+	for (const [key, value] of Object.entries(nextSchema)) {
+		const schemaValue = toGeminiSchemaValue(value);
+		if (schemaValue !== undefined) {
+			sanitizedSchema[key] = schemaValue;
+		}
+	}
+
+	return sanitizedSchema;
+}
+
+export function toGeminiCompatibleSchema(schema: unknown): IDataObject {
+	if (!isPlainObject(schema)) {
+		return {};
+	}
+
+	return sanitizeGeminiSchemaObject(schema) as IDataObject;
+}
+
+export function formatToGeminiToolDeclaration(
+	tool: Tool,
+): NonNullable<GeminiTool['functionDeclarations']>[number] {
+	const schema = zodToJsonSchema(tool.schema, { target: 'openApi3' });
+
+	return {
+		name: tool.name,
+		description: tool.description,
+		parameters: toGeminiCompatibleSchema(schema),
+	};
+}
 
 export async function downloadFile(
 	this: IExecuteFunctions,

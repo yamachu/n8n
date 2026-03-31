@@ -1,20 +1,144 @@
 import type { SafetySetting } from '@google/generative-ai';
+import type { Tool } from '@langchain/core/tools';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import {
+	makeN8nLlmFailedAttemptHandler,
+	N8nLlmTracing,
+	getConnectionHintNoticeField,
+} from '@n8n/ai-utilities';
 import { NodeConnectionTypes } from 'n8n-workflow';
 import type {
 	NodeError,
+	IDataObject,
 	INodeType,
 	INodeTypeDescription,
 	ISupplyDataFunctions,
 	SupplyData,
 } from 'n8n-workflow';
 
-import { getAdditionalOptions } from '../gemini-common/additional-options';
 import {
-	makeN8nLlmFailedAttemptHandler,
-	N8nLlmTracing,
-	getConnectionHintNoticeField,
-} from '@n8n/ai-utilities';
+	formatToGeminiToolDeclaration,
+	toGeminiCompatibleSchema,
+} from '../../vendors/GoogleGemini/helpers/utils';
+import { getAdditionalOptions } from '../gemini-common/additional-options';
+
+type GeminiBindToolsInput = Parameters<ChatGoogleGenerativeAI['bindTools']>[0];
+
+type FunctionDeclaration = {
+	name: string;
+	description?: string;
+	parameters?: IDataObject;
+};
+
+type FunctionDeclarationsTool = {
+	functionDeclarations: FunctionDeclaration[];
+};
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+function isFunctionDeclarationsTool(value: unknown): value is FunctionDeclarationsTool {
+	if (!isObject(value) || !Array.isArray(value.functionDeclarations)) {
+		return false;
+	}
+
+	return value.functionDeclarations.every(
+		(declaration) => isObject(declaration) && typeof declaration.name === 'string',
+	);
+}
+
+function isLangChainToolLike(value: unknown): value is Tool {
+	return (
+		isObject(value) &&
+		typeof value.name === 'string' &&
+		typeof value.description === 'string' &&
+		'schema' in value
+	);
+}
+
+function isOpenAiFunctionToolLike(
+	value: unknown,
+): value is { type: 'function'; function: Record<string, unknown> } {
+	if (!isObject(value) || value.type !== 'function' || !isObject(value.function)) {
+		return false;
+	}
+
+	return typeof value.function.name === 'string';
+}
+
+function sanitizeFunctionDeclarationsTool(
+	tool: FunctionDeclarationsTool,
+): FunctionDeclarationsTool {
+	return {
+		functionDeclarations: tool.functionDeclarations.map((declaration) => ({
+			...declaration,
+			parameters: toGeminiCompatibleSchema(declaration.parameters),
+		})),
+	};
+}
+
+function convertOpenAiFunctionTool(tool: {
+	type: 'function';
+	function: Record<string, unknown>;
+}): FunctionDeclarationsTool {
+	return {
+		functionDeclarations: [
+			{
+				name: tool.function.name as string,
+				description:
+					typeof tool.function.description === 'string'
+						? tool.function.description
+						: 'A function available to call.',
+				parameters: toGeminiCompatibleSchema(tool.function.parameters),
+			},
+		],
+	};
+}
+
+export function normalizeGeminiBindTools(tools: GeminiBindToolsInput): GeminiBindToolsInput {
+	const passthroughTools: unknown[] = [];
+	const functionDeclarations: FunctionDeclaration[] = [];
+
+	for (const tool of tools) {
+		if (isLangChainToolLike(tool)) {
+			functionDeclarations.push(formatToGeminiToolDeclaration(tool));
+			continue;
+		}
+
+		if (isOpenAiFunctionToolLike(tool)) {
+			functionDeclarations.push.apply(
+				functionDeclarations,
+				convertOpenAiFunctionTool(tool).functionDeclarations,
+			);
+			continue;
+		}
+
+		if (isFunctionDeclarationsTool(tool)) {
+			functionDeclarations.push.apply(
+				functionDeclarations,
+				sanitizeFunctionDeclarationsTool(tool).functionDeclarations,
+			);
+			continue;
+		}
+
+		passthroughTools.push(tool);
+	}
+
+	if (functionDeclarations.length === 0) {
+		return passthroughTools as GeminiBindToolsInput;
+	}
+
+	return [...passthroughTools, { functionDeclarations }] as GeminiBindToolsInput;
+}
+
+function patchGeminiBindTools(model: ChatGoogleGenerativeAI): void {
+	const originalBindTools = model.bindTools.bind(model);
+
+	model.bindTools = (tools, kwargs) => {
+		return originalBindTools(normalizeGeminiBindTools(tools), kwargs);
+	};
+}
 
 function errorDescriptionMapper(error: NodeError) {
 	if (error.description?.includes('properties: should be non-empty for OBJECT type')) {
@@ -160,6 +284,8 @@ export class LmChatGoogleGemini implements INodeType {
 			callbacks: [new N8nLlmTracing(this, { errorDescriptionMapper })],
 			onFailedAttempt: makeN8nLlmFailedAttemptHandler(this),
 		});
+
+		patchGeminiBindTools(model);
 
 		return {
 			response: model,
